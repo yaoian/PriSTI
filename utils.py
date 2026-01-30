@@ -6,6 +6,35 @@ import pickle
 import logging
 import time
 
+
+def resolve_device(requested_device: str) -> str:
+    requested = (requested_device or "auto").strip().lower()
+
+    if requested == "auto":
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    if requested == "cpu":
+        return "cpu"
+
+    if requested == "cuda":
+        requested = "cuda:0"
+
+    if requested.startswith("cuda"):
+        if torch.cuda.is_available():
+            return requested
+        print(f"[PriSTI] CUDA 不可用，已从 {requested_device!r} 回退到 'cpu'")
+        return "cpu"
+
+    return requested_device
+
+
+def seed_everything(seed: int, device: str) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if isinstance(device, str) and device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
 def train(
     model,
     config,

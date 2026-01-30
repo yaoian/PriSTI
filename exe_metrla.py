@@ -9,14 +9,13 @@ import numpy as np
 
 from dataset_metrla import get_dataloader
 from main_model import PriSTI_MetrLA
-from utils import train, evaluate
+from utils import train, evaluate, resolve_device, seed_everything
 
 
 def main(args):
+    device = resolve_device(args.device)
     SEED = args.seed
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
-    torch.cuda.manual_seed(SEED)
+    seed_everything(SEED, device)
 
     path = "config/" + args.config
     with open(path, "r") as f:
@@ -26,6 +25,7 @@ def main(args):
     config["model"]["target_strategy"] = args.targetstrategy
     config["diffusion"]["adj_file"] = 'metr-la'
     config["seed"] = SEED
+    config["device"] = device
 
     print(json.dumps(config, indent=4))
 
@@ -40,11 +40,11 @@ def main(args):
         json.dump(config, f, indent=4)
 
     train_loader, valid_loader, test_loader, scaler, mean_scaler = get_dataloader(
-        config["train"]["batch_size"], device=args.device, missing_pattern=args.missing_pattern,
+        config["train"]["batch_size"], device=device, missing_pattern=args.missing_pattern,
         is_interpolate=config["model"]["use_guide"], num_workers=args.num_workers,
         target_strategy=args.targetstrategy,
     )
-    model = PriSTI_MetrLA(config, args.device).to(args.device)
+    model = PriSTI_MetrLA(config, device).to(device)
 
     if args.modelfolder == "":
         train(
@@ -55,7 +55,7 @@ def main(args):
             foldername=foldername,
         )
     else:
-        model.load_state_dict(torch.load("./save/" + args.modelfolder + "/model.pth"))
+        model.load_state_dict(torch.load("./save/" + args.modelfolder + "/model.pth", map_location=device))
 
     logging.basicConfig(filename=foldername + '/test_model.log', level=logging.DEBUG)
     logging.info("model_name={}".format(args.modelfolder))
@@ -72,8 +72,8 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="PriSTI")
     parser.add_argument("--config", type=str, default="traffic.yaml")
-    parser.add_argument('--device', default='cuda:0', help='Device for Attack')
-    parser.add_argument('--num_workers', type=int, default=4, help='Device for Attack')
+    parser.add_argument('--device', default='cuda:0', help="运行设备：cpu | cuda[:id] | auto")
+    parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument("--modelfolder", type=str, default="")
     parser.add_argument(
         "--targetstrategy", type=str, default="block", choices=["mix", "random", "block"]
