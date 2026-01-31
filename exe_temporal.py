@@ -21,9 +21,7 @@ except Exception:
 
 
 def _ensure_b_l_2(arr):
-    t = arr
-    if not torch.is_tensor(t):
-        t = torch.tensor(t)
+    t = arr if torch.is_tensor(arr) else torch.as_tensor(arr)
     if t.ndim == 2 and t.shape[1] == 2:
         t = t.unsqueeze(0)
     elif t.ndim == 3 and t.shape[1] == 2:
@@ -31,6 +29,17 @@ def _ensure_b_l_2(arr):
     if t.ndim != 3 or t.shape[-1] != 2:
         raise ValueError(f"trajectory shape unsupported: {tuple(t.shape)}")
     return t
+
+
+def _stack_list_to_b_l_2(items):
+    if len(items) == 0:
+        raise ValueError("empty trajectory list")
+    processed = []
+    for x in items:
+        t = x if torch.is_tensor(x) else torch.as_tensor(x)
+        t = _ensure_b_l_2(t)
+        processed.append(t)
+    return torch.cat(processed, dim=0)
 
 
 def _linear_interpolate_np(x_gt, mask_obs):
@@ -52,9 +61,12 @@ def load_raw_trajs(path):
     if isinstance(obj, dict):
         for key in ["trajs", "traj", "data", "loc", "loc_0", "xy", "coords"]:
             if key in obj:
-                return _ensure_b_l_2(obj[key])
+                data = obj[key]
+                if isinstance(data, (list, tuple)):
+                    return _stack_list_to_b_l_2(data)
+                return _ensure_b_l_2(data)
     if isinstance(obj, (list, tuple)):
-        return _ensure_b_l_2(torch.stack([torch.tensor(x) for x in obj], dim=0))
+        return _stack_list_to_b_l_2(obj)
     raise ValueError(f"unsupported data format in {path}")
 
 
