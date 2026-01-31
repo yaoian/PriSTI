@@ -27,8 +27,13 @@ def _ensure_b_l_2(x):
         t = x
     else:
         t = torch.tensor(x)
-    if t.ndim == 2 and t.shape[1] == 2:
-        t = t.unsqueeze(0)
+    if t.ndim == 2:
+        if t.shape[1] == 2:
+            t = t.unsqueeze(0)
+        elif t.shape[0] == 2:
+            t = t.transpose(0, 1).unsqueeze(0)
+        elif t.shape[0] >= 3:
+            t = t[:2, :].transpose(0, 1).unsqueeze(0)
     elif t.ndim == 3 and t.shape[1] == 2:
         t = t.permute(0, 2, 1)
     if t.ndim != 3 or t.shape[-1] != 2:
@@ -36,43 +41,142 @@ def _ensure_b_l_2(x):
     return t
 
 
-def load_raw_trajs(path):
+def _find_first_array(obj):
+    if torch.is_tensor(obj) or isinstance(obj, np.ndarray):
+        return obj
+    if isinstance(obj, dict):
+        for v in obj.values():
+            found = _find_first_array(v)
+            if found is not None:
+                return found
+    if isinstance(obj, (list, tuple)):
+        for v in obj:
+            found = _find_first_array(v)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_traj_from_item(item):
+    if isinstance(item, dict):
+        for key in ["loc", "loc_0", "traj", "trajs", "data", "xy", "coords"]:
+            if key in item:
+                return item[key]
+        fallback = _find_first_array(item)
+        if fallback is not None:
+            return fallback
+        raise ValueError("trajectory dict missing array-like fields")
+    return item
+
+
+def _stack_list_to_b_l_2(items):
+    if len(items) == 0:
+        raise ValueError("empty trajectory list")
+    processed = []
+    for x in items:
+        x = _extract_traj_from_item(x)
+        t = x if torch.is_tensor(x) else torch.as_tensor(x)
+        t = _ensure_b_l_2(t)
+        processed.append(t)
+    return torch.cat(processed, dim=0)
+
+
+def _select_data_by_key(obj, data_key):
+    if data_key is None:
+        return obj
+    if isinstance(obj, (list, tuple)):
+        if data_key in ("a", "A"):
+            return obj[0]
+        if data_key in ("b", "B"):
+            return obj[1] if len(obj) > 1 else obj[0]
+        try:
+            idx = int(data_key)
+            return obj[idx]
+        except Exception as exc:
+            raise ValueError(f"data_key={data_key} not valid for list/tuple") from exc
+    if isinstance(obj, dict):
+        if data_key in obj:
+            return obj[data_key]
+        raise ValueError(f"data_key={data_key} not found in dict keys")
+    return obj
+
+
+def load_raw_trajs(path, data_key=None):
     obj = torch.load(path, map_location="cpu")
+    if isinstance(obj, dict):
+        if data_key is not None and data_key in obj:
+            obj = obj[data_key]
+            data_key = None
+        else:
+            for key in ["trajs", "traj", "data", "loc", "loc_0", "xy", "coords"]:
+                if key in obj:
+                    obj = obj[key]
+                    break
+    if data_key is not None:
+        if isinstance(obj, np.ndarray) and getattr(obj, "dtype", None) == object:
+            obj = [_select_data_by_key(item, data_key) for item in list(obj)]
+        elif isinstance(obj, (list, tuple)):
+            obj = [_select_data_by_key(item, data_key) for item in obj]
+        else:
+            obj = _select_data_by_key(obj, data_key)
+    if data_key is None and isinstance(obj, (list, tuple)) and len(obj) > 0:
+        first = obj[0]
+        if isinstance(first, (list, tuple)) and len(first) >= 2:
+            try:
+                _ = _ensure_b_l_2(first[0])
+                obj = [item[0] for item in obj]
+            except Exception:
+                pass
     if torch.is_tensor(obj):
         return _ensure_b_l_2(obj)
-    if isinstance(obj, dict):
-        for key in ["trajs", "traj", "data", "loc", "loc_0", "xy", "coords"]:
-            if key in obj:
-                return _ensure_b_l_2(obj[key])
+    if isinstance(obj, np.ndarray) and getattr(obj, "dtype", None) == object:
+        return _stack_list_to_b_l_2(list(obj))
     if isinstance(obj, (list, tuple)):
-        return _ensure_b_l_2(torch.stack([torch.tensor(x) for x in obj], dim=0))
+        return _stack_list_to_b_l_2(obj)
     raise ValueError(f"unsupported data format in {path}")
 
 
 def load_test_batch(path):
     obj = torch.load(path, map_location="cpu")
-    if not isinstance(obj, dict):
-        raise ValueError("test file must be a dict with loc_0/mask fields")
-    if "loc_0" not in obj or "mask" not in obj:
-        raise ValueError("test file missing loc_0 or mask")
-    loc_0 = _ensure_b_l_2(obj["loc_0"])
-    mask = obj["mask"]
-    if torch.is_tensor(mask):
-        mask_t = mask.clone()
+    if isinstance(obj, tuple):
+        if len(obj) == 8:
+            loc_0, _, loc_guess, _, mask, *_ = obj
+        elif len(obj) == 10:
+            loc_0, _, loc_guess, _, _, _, mask, *_ = obj
+        else:
+            raise ValueError(f"test tuple length unsupported: {len(obj)}")
+        x_gt = _ensure_b_l_2(loc_0)
+        mask_t = mask.clone() if torch.is_tensor(mask) else torch.tensor(mask)
+        if mask_t.ndim == 3 and mask_t.shape[1] == 1:
+            mask_t = mask_t[:, 0, :]
+        if mask_t.ndim != 2:
+            raise ValueError(f"mask shape unsupported: {tuple(mask_t.shape)}")
+        valid = mask_t >= 0
+        mask_obs = ((mask_t <= 0.1) & valid).float()
+        x_obs = x_gt * mask_obs.unsqueeze(-1)
+        x_interp = _ensure_b_l_2(loc_guess) if loc_guess is not None else None
+    elif isinstance(obj, dict):
+        if "loc_0" not in obj or "mask" not in obj:
+            raise ValueError("test file missing loc_0 or mask")
+        x_gt = _ensure_b_l_2(obj["loc_0"])
+        mask = obj["mask"]
+        mask_t = mask.clone() if torch.is_tensor(mask) else torch.tensor(mask)
+        if mask_t.ndim == 3 and mask_t.shape[1] == 1:
+            mask_t = mask_t[:, 0, :]
+        if mask_t.ndim != 2:
+            raise ValueError(f"mask shape unsupported: {tuple(mask_t.shape)}")
+        valid = mask_t >= 0
+        mask_obs = ((mask_t <= 0.1) & valid).float()
+        x_obs = x_gt * mask_obs.unsqueeze(-1)
+        x_interp = _ensure_b_l_2(obj["loc_guess"]) if "loc_guess" in obj else None
     else:
-        mask_t = torch.tensor(mask)
-    if mask_t.ndim == 3 and mask_t.shape[1] == 1:
-        mask_t = mask_t[:, 0, :]
-    if mask_t.ndim != 2:
-        raise ValueError(f"mask shape unsupported: {tuple(mask_t.shape)}")
+        raise ValueError("test file must be dict or tuple batch")
 
-    valid = mask_t >= 0
-    mask_obs = ((mask_t <= 0.1) & valid).float()
-    x_gt = loc_0
-    x_obs = x_gt * mask_obs.unsqueeze(-1)
-    x_interp = None
-    if "loc_guess" in obj:
-        x_interp = _ensure_b_l_2(obj["loc_guess"])
+    if x_interp is None:
+        x_interp = []
+        for i in range(x_gt.shape[0]):
+            x_interp.append(linear_interpolate_np(x_gt[i].numpy(), mask_obs[i].numpy()))
+        x_interp = torch.tensor(np.stack(x_interp, axis=0))
     return x_gt, x_obs, mask_obs, valid.float(), x_interp
 
 
