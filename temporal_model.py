@@ -163,7 +163,7 @@ class TemporalPriSTIDiffusion(nn.Module):
 
         self._logged_shape = False
 
-    def forward(self, batch, is_train=1, set_t=-1):
+    def forward(self, batch, is_train=1, set_t=-1, return_stats=False):
         required_keys = ["x_gt", "x_obs", "x_interp", "mask_obs"]
         missing = [k for k in required_keys if k not in batch]
         if missing:
@@ -204,6 +204,14 @@ class TemporalPriSTIDiffusion(nn.Module):
             logging.info(msg)
             self._logged_shape = True
 
+        if return_stats:
+            stats = {
+                "t": t.detach(),
+                "eps_pred": eps_pred.detach(),
+                "eps_true": eps_true.detach(),
+                "mask_obs": mask_obs.detach(),
+            }
+            return loss, stats
         return loss
 
     @torch.no_grad()

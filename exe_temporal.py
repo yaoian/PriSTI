@@ -3,6 +3,8 @@ import datetime
 import json
 import logging
 import os
+import time
+from collections import deque
 
 import numpy as np
 import torch
@@ -19,6 +21,22 @@ try:
     from torch.utils.tensorboard import SummaryWriter
 except Exception:
     SummaryWriter = None
+
+
+class MovingAverage:
+    def __init__(self, window_size):
+        self.window_size = max(1, int(window_size))
+        self._buf = deque(maxlen=self.window_size)
+
+    def update(self, value):
+        self._buf.append(float(value))
+        return self.value
+
+    @property
+    def value(self):
+        if not self._buf:
+            return 0.0
+        return sum(self._buf) / len(self._buf)
 
 
 def _ensure_b_l_2(arr):
@@ -247,6 +265,22 @@ def train_temporal(
             optimizer, milestones=[p1, p2], gamma=0.1
         )
     writer = SummaryWriter(tb_dir) if (tb_dir and SummaryWriter is not None) else None
+    mov_avg_interval = int(os.environ.get("TRACE_MOV_AVG_INTERVAL", config_train.get("mov_avg_interval", 100)))
+    log_interval = int(os.environ.get("TRACE_TB_LOG_INTERVAL", config_train.get("log_interval", 50)))
+    tb_hist_interval = int(os.environ.get("TRACE_TB_HIST_INTERVAL", "500"))
+    mov_avg_loss = MovingAverage(mov_avg_interval)
+
+    if writer and tb_dir:
+        os.makedirs(tb_dir, exist_ok=True)
+        writer.add_text("run/log_dir", tb_dir, 0)
+        writer.add_text("run/save_dir", foldername, 0)
+        info_path = os.path.join(tb_dir, "info.txt")
+        config_path = os.path.join(tb_dir, "train_config.json")
+        with open(info_path, "w") as f:
+            f.write(f"log_dir: {tb_dir}\n")
+            f.write(f"save_dir: {foldername}\n")
+        with open(config_path, "w") as f:
+            json.dump(config_train, f, indent=2)
 
     output_path = os.path.join(foldername, "model.pth") if foldername else None
     if foldername:
@@ -257,26 +291,121 @@ def train_temporal(
     for epoch_no in range(config_train["epochs"]):
         avg_loss = 0.0
         model.train()
+        last_step_time = time.perf_counter()
         with tqdm(train_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, batch in enumerate(it, start=1):
                 optimizer.zero_grad()
-                loss = model(batch)
+                need_log = writer is not None and log_interval > 0 and global_step % log_interval == 0
+                need_hist = writer is not None and tb_hist_interval > 0 and global_step % tb_hist_interval == 0
+                need_stats = need_log or need_hist
+                if need_stats:
+                    loss, stats = model(batch, return_stats=True)
+                else:
+                    loss = model(batch)
+                    stats = None
                 loss.backward()
                 optimizer.step()
 
-                avg_loss += loss.item()
+                loss_float = float(loss.item())
+                avg_loss += loss_float
+                mov_avg_loss.update(loss_float)
                 if writer:
-                    writer.add_scalar("train/loss", loss.item(), global_step)
+                    writer.add_scalar("train/loss", loss_float, global_step)
                 global_step += 1
 
                 it.set_postfix(
                     ordered_dict={
-                        "loss": loss.item(),
+                        "loss": loss_float,
                         "avg_epoch_loss": avg_loss / batch_no,
                         "epoch": epoch_no,
                     },
                     refresh=False,
                 )
+
+                if writer:
+                    step = global_step - 1
+                if writer and log_interval > 0 and step % log_interval == 0:
+                    writer.add_scalar("Loss", float(mov_avg_loss.value), step)
+                    writer.add_scalar("LR", optimizer.param_groups[0]["lr"], step)
+                    writer.add_scalar("Loss/mov_avg", float(mov_avg_loss.value), step)
+                    writer.add_scalar("Loss/raw", float(loss_float), step)
+
+                    for gi, group in enumerate(optimizer.param_groups):
+                        if "lr" in group:
+                            writer.add_scalar(f"LR/group{gi}", float(group["lr"]), step)
+
+                    if stats is not None:
+                        t = stats["t"]
+                        writer.add_scalar("Diffusion/t_mean", float(t.float().mean().item()), step)
+                        writer.add_scalar("Diffusion/t_min", float(t.min().item()), step)
+                        writer.add_scalar("Diffusion/t_max", float(t.max().item()), step)
+
+                        mask_obs = stats["mask_obs"]
+                        valid_1d = mask_obs >= 0
+                        erased_1d = mask_obs <= 0.5
+                        valid_counts = valid_1d.sum(dim=1).float()
+                        erased_counts = erased_1d.sum(dim=1).float()
+                        erase_rate_per = torch.where(
+                            valid_counts > 0,
+                            erased_counts / valid_counts,
+                            torch.zeros_like(valid_counts),
+                        )
+
+                        writer.add_scalar(
+                            "Data/points_valid_mean", float(valid_counts.mean().item()), step
+                        )
+                        writer.add_scalar(
+                            "Data/points_valid_median", float(valid_counts.median().item()), step
+                        )
+                        writer.add_scalar(
+                            "Data/points_erased_mean", float(erased_counts.mean().item()), step
+                        )
+                        writer.add_scalar(
+                            "Data/erase_rate_mean", float(erase_rate_per.mean().item()), step
+                        )
+                        writer.add_scalar(
+                            "Data/erase_rate_median", float(erase_rate_per.median().item()), step
+                        )
+
+                        eps_pred = stats["eps_pred"]
+                        eps_true = stats["eps_true"]
+                        writer.add_scalar(
+                            "Eps/output_abs_mean", float(eps_pred.abs().mean().item()), step
+                        )
+                        writer.add_scalar(
+                            "Eps/target_abs_mean", float(eps_true.abs().mean().item()), step
+                        )
+
+                    step_time_ms = (time.perf_counter() - last_step_time) * 1000.0
+                    last_step_time = time.perf_counter()
+                    writer.add_scalar("Time/step_ms", float(step_time_ms), step)
+                    if torch.cuda.is_available():
+                        device = next(model.parameters()).device
+                        if device.type == "cuda":
+                            writer.add_scalar(
+                                "CUDA/max_memory_mb",
+                                float(torch.cuda.max_memory_allocated(device) / 1024 / 1024),
+                                step,
+                            )
+                            writer.add_scalar(
+                                "CUDA/reserved_memory_mb",
+                                float(torch.cuda.memory_reserved(device) / 1024 / 1024),
+                                step,
+                            )
+
+                if writer and stats is not None and tb_hist_interval > 0 and step % tb_hist_interval == 0:
+                    mask_obs = stats["mask_obs"]
+                    valid_1d = mask_obs >= 0
+                    erased_1d = mask_obs <= 0.5
+                    valid_counts = valid_1d.sum(dim=1).float()
+                    erased_counts = erased_1d.sum(dim=1).float()
+                    erase_rate_per = torch.where(
+                        valid_counts > 0,
+                        erased_counts / valid_counts,
+                        torch.zeros_like(valid_counts),
+                    )
+                    writer.add_histogram("Data/sample_length", valid_counts, step)
+                    writer.add_histogram("Data/erase_rate", erase_rate_per, step)
 
                 if valid_loader is not None and validate_every_steps > 0 and global_step % validate_every_steps == 0:
                     valid_loss = _eval_loss(model, valid_loader)
