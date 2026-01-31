@@ -27,6 +27,9 @@ def _ensure_b_l_2(arr):
             t = t.unsqueeze(0)
         elif t.shape[0] == 2:
             t = t.transpose(0, 1).unsqueeze(0)
+        elif t.shape[0] >= 3:
+            # assume (C, L) where first two channels are x/y
+            t = t[:2, :].transpose(0, 1).unsqueeze(0)
     elif t.ndim == 3 and t.shape[1] == 2:
         t = t.permute(0, 2, 1)
     if t.ndim != 3 or t.shape[-1] != 2:
