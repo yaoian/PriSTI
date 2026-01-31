@@ -1,0 +1,28 @@
+train:
+  epochs: 50
+  batch_size: 32
+  lr: 1.0e-3
+  is_lr_decay: false
+
+diffusion:
+  num_steps: 50
+  beta_start: 0.0001
+  beta_end: 0.2
+  schedule: "linear"
+
+model:
+  temporal_d_model: 128
+  temporal_layers: 4
+  temporal_ffn_mult: 4
+
+data:
+  dataset: "xian"
+  traj_len: 512
+  sparsity: 0.5
+  keep_mode: "random"
+  interval: null
+  data_file: null
+  max_samples: null
+  valid_ratio: 0.1
+  validate_every_steps: 1000
+  valid_file: null

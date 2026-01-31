@@ -9,6 +9,7 @@ import numpy as np
 
 from dataset_aqi36 import get_dataloader
 from main_model import PriSTI_aqi36
+from temporal_model import TemporalPriSTIDiffusion
 from utils import train, evaluate, resolve_device, seed_everything
 
 
@@ -44,7 +45,10 @@ def main(args):
         is_interpolate=config["model"]["use_guide"], num_workers=args.num_workers,
         target_strategy=args.targetstrategy, mask_sensor=config["model"]["mask_sensor"]
     )
-    model = PriSTI_aqi36(config, device).to(device)
+    if config["model"].get("temporal_only", False):
+        model = TemporalPriSTIDiffusion(config, device).to(device)
+    else:
+        model = PriSTI_aqi36(config, device).to(device)
 
     if args.modelfolder == "":
         train(
@@ -59,14 +63,15 @@ def main(args):
 
     logging.basicConfig(filename=foldername + '/test_model.log', level=logging.DEBUG)
     logging.info("model_name={}".format(args.modelfolder))
-    evaluate(
-        model,
-        test_loader,
-        nsample=args.nsample,
-        scaler=scaler,
-        mean_scaler=mean_scaler,
-        foldername=foldername,
-    )
+    if not config["model"].get("temporal_only", False):
+        evaluate(
+            model,
+            test_loader,
+            nsample=args.nsample,
+            scaler=scaler,
+            mean_scaler=mean_scaler,
+            foldername=foldername,
+        )
 
 
 if __name__ == '__main__':

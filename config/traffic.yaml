@@ -29,3 +29,7 @@ model:
   target_strategy: "hybrid"
   use_guide: true
   mask_sensor: []
+  temporal_only: false
+  temporal_d_model: 128
+  temporal_layers: 4
+  temporal_ffn_mult: 4
