@@ -22,6 +22,11 @@ try:
 except Exception:
     SummaryWriter = None
 
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
+
 
 class MovingAverage:
     def __init__(self, window_size):
@@ -247,6 +252,40 @@ def _eval_loss(model, valid_loader):
     return total / max(1, count)
 
 
+def _make_recovery_figure(x_gt, x_pred):
+    if plt is None:
+        return None
+    fig = plt.figure(figsize=(4, 4))
+    ax = fig.add_subplot(111)
+    gt = x_gt.reshape(-1, 2).detach().cpu().numpy()
+    pr = x_pred.reshape(-1, 2).detach().cpu().numpy()
+    ax.scatter(gt[:, 0], gt[:, 1], s=1, c="blue", alpha=0.6, label="gt")
+    ax.scatter(pr[:, 0], pr[:, 1], s=1, c="red", alpha=0.6, label="rec")
+    ax.set_aspect("equal", "box")
+    ax.legend(markerscale=3, fontsize=8)
+    return fig
+
+
+@torch.no_grad()
+def _eval_recovery(model, batch):
+    model.eval()
+    x_gt = batch["x_gt"].to(model.device).float()
+    x_obs = batch["x_obs"].to(model.device).float()
+    x_interp = batch["x_interp"].to(model.device).float()
+    mask_obs = batch["mask_obs"].to(model.device).float()
+
+    x_pred, _ = model.impute(x_obs, x_interp, mask_obs, return_missing_only=False)
+    mask_missing = (1.0 - mask_obs) > 0.5
+    if mask_missing.any():
+        mse = ((x_pred - x_gt) ** 2)[mask_missing.unsqueeze(-1).expand_as(x_gt)].mean().item()
+    else:
+        mse = 0.0
+    recovery_loss = mse * 1000.0
+    fig = _make_recovery_figure(x_gt, x_pred)
+    model.train()
+    return recovery_loss, fig
+
+
 def train_temporal(
     model,
     config_train,
@@ -255,6 +294,7 @@ def train_temporal(
     validate_every_steps=1000,
     foldername="",
     tb_dir=None,
+    recovery_batch=None,
 ):
     optimizer = Adam(model.parameters(), lr=config_train["lr"], weight_decay=1e-6)
     is_lr_decay = config_train.get("is_lr_decay", False)
@@ -415,6 +455,12 @@ def train_temporal(
                     if valid_loss < best_valid and foldername:
                         best_valid = valid_loss
                         torch.save(model.state_dict(), os.path.join(foldername, "best.pth"))
+                    if writer and recovery_batch is not None:
+                        recovery_loss, fig = _eval_recovery(model, recovery_batch)
+                        writer.add_scalar("Recovery Loss", recovery_loss, global_step)
+                        if fig is not None:
+                            writer.add_figure("Recovery Figure", fig, global_step)
+                            plt.close(fig)
 
         if writer:
             writer.add_scalar("train/avg_epoch_loss", avg_loss / batch_no, epoch_no)
@@ -430,6 +476,12 @@ def train_temporal(
         if valid_loss < best_valid and foldername:
             best_valid = valid_loss
             torch.save(model.state_dict(), os.path.join(foldername, "best.pth"))
+        if writer and recovery_batch is not None:
+            recovery_loss, fig = _eval_recovery(model, recovery_batch)
+            writer.add_scalar("Recovery Loss", recovery_loss, global_step)
+            if fig is not None:
+                writer.add_figure("Recovery Figure", fig, global_step)
+                plt.close(fig)
 
     if output_path is not None:
         torch.save(model.state_dict(), output_path)
@@ -532,6 +584,15 @@ def main(args):
     if SummaryWriter is None:
         print("[TemporalPriSTI] tensorboard not available (missing torch.utils.tensorboard).")
         tb_dir = None
+    if plt is None:
+        print("[TemporalPriSTI] matplotlib not available (skip Recovery Figure).")
+
+    recovery_batch = None
+    if valid_loader is not None:
+        try:
+            recovery_batch = next(iter(valid_loader))
+        except Exception:
+            recovery_batch = None
 
     train_temporal(
         model,
@@ -541,6 +602,7 @@ def main(args):
         validate_every_steps=validate_every_steps,
         foldername=foldername,
         tb_dir=tb_dir,
+        recovery_batch=recovery_batch,
     )
 
 
