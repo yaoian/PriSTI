@@ -411,7 +411,11 @@ def build_table(records):
         headers.append("jsd_grids64_x1000")
     lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
     for r in records:
-        row = [r.get("dataset", ""), r.get("sparsity", ""), r.get("L", "")]
+        row = [
+            _fmt(r.get("dataset", "")),
+            _fmt(r.get("sparsity", "")),
+            _fmt(r.get("L", "")),
+        ]
         row.append(_fmt(r.get("mse_erased_x1000")))
         row.append(_fmt(r.get("mse_valid_x1000")))
         if "ndtw_mean_x1000" in headers:
