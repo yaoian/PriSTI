@@ -129,6 +129,15 @@ def load_raw_trajs(path, data_key=None):
             obj = [_select_data_by_key(item, data_key) for item in obj]
         else:
             obj = _select_data_by_key(obj, data_key)
+    # 若未指定 data_key，但数据是 (a,b) 结构列表，默认取 a
+    if data_key is None and isinstance(obj, (list, tuple)) and len(obj) > 0:
+        first = obj[0]
+        if isinstance(first, (list, tuple)) and len(first) >= 2:
+            try:
+                _ = _ensure_b_l_2(first[0])
+                obj = [item[0] for item in obj]
+            except Exception:
+                pass
     if torch.is_tensor(obj):
         return _ensure_b_l_2(obj)
     if isinstance(obj, np.ndarray) and getattr(obj, "dtype", None) == object:
@@ -140,23 +149,41 @@ def load_raw_trajs(path, data_key=None):
 
 def load_test_batch(path, traj_len=None):
     obj = torch.load(path, map_location="cpu")
-    if not isinstance(obj, dict):
-        raise ValueError("valid_file must be a dict with loc_0/mask fields")
-    if "loc_0" not in obj or "mask" not in obj:
-        raise ValueError("valid_file missing loc_0 or mask")
-    x_gt = _ensure_b_l_2(obj["loc_0"])
-    mask = obj["mask"]
-    mask_t = mask.clone() if torch.is_tensor(mask) else torch.tensor(mask)
-    if mask_t.ndim == 3 and mask_t.shape[1] == 1:
-        mask_t = mask_t[:, 0, :]
-    if mask_t.ndim != 2:
-        raise ValueError(f"mask shape unsupported: {tuple(mask_t.shape)}")
-    valid = mask_t >= 0
-    mask_obs = ((mask_t <= 0.1) & valid).float()
-    x_obs = x_gt * mask_obs.unsqueeze(-1)
-    if "loc_guess" in obj:
-        x_interp = _ensure_b_l_2(obj["loc_guess"])
+    if isinstance(obj, tuple):
+        if len(obj) == 8:
+            loc_0, _, loc_guess, _, mask, *_ = obj
+        elif len(obj) == 10:
+            loc_0, _, loc_guess, _, _, _, mask, *_ = obj
+        else:
+            raise ValueError(f"valid_file tuple length unsupported: {len(obj)}")
+        x_gt = _ensure_b_l_2(loc_0)
+        mask_t = mask.clone() if torch.is_tensor(mask) else torch.tensor(mask)
+        if mask_t.ndim == 3 and mask_t.shape[1] == 1:
+            mask_t = mask_t[:, 0, :]
+        if mask_t.ndim != 2:
+            raise ValueError(f"mask shape unsupported: {tuple(mask_t.shape)}")
+        valid = mask_t >= 0
+        mask_obs = ((mask_t <= 0.1) & valid).float()
+        x_obs = x_gt * mask_obs.unsqueeze(-1)
+        x_interp = _ensure_b_l_2(loc_guess) if loc_guess is not None else None
+    elif isinstance(obj, dict):
+        if "loc_0" not in obj or "mask" not in obj:
+            raise ValueError("valid_file missing loc_0 or mask")
+        x_gt = _ensure_b_l_2(obj["loc_0"])
+        mask = obj["mask"]
+        mask_t = mask.clone() if torch.is_tensor(mask) else torch.tensor(mask)
+        if mask_t.ndim == 3 and mask_t.shape[1] == 1:
+            mask_t = mask_t[:, 0, :]
+        if mask_t.ndim != 2:
+            raise ValueError(f"mask shape unsupported: {tuple(mask_t.shape)}")
+        valid = mask_t >= 0
+        mask_obs = ((mask_t <= 0.1) & valid).float()
+        x_obs = x_gt * mask_obs.unsqueeze(-1)
+        x_interp = _ensure_b_l_2(obj["loc_guess"]) if "loc_guess" in obj else None
     else:
+        raise ValueError("valid_file must be dict or tuple batch")
+
+    if x_interp is None:
         x_interp = []
         for i in range(x_gt.shape[0]):
             x_interp.append(_linear_interpolate_np(x_gt[i].numpy(), mask_obs[i].numpy()))
@@ -316,8 +343,21 @@ def main(args):
     )
 
     if valid_file:
-        x_gt_v, x_obs_v, mask_obs_v, x_interp_v = load_test_batch(valid_file, traj_len=int(traj_len))
-        valid_dataset = BatchTrajectoryDataset(x_gt_v, x_obs_v, mask_obs_v, x_interp_v)
+        try:
+            x_gt_v, x_obs_v, mask_obs_v, x_interp_v = load_test_batch(valid_file, traj_len=int(traj_len))
+            valid_dataset = BatchTrajectoryDataset(x_gt_v, x_obs_v, mask_obs_v, x_interp_v)
+        except Exception as e:
+            print(f"[TemporalPriSTI] valid_file fallback to raw trajs ({e})")
+            valid_trajs = load_raw_trajs(valid_file, data_key=data_key)
+            valid_dataset = TrajectoryImputationDataset(
+                valid_trajs,
+                window_length=int(traj_len),
+                stride=int(traj_len),
+                sparsity=float(sparsity),
+                keep_mode=keep_mode,
+                interval=interval,
+                seed=args.seed,
+            )
         train_dataset = full_dataset
     else:
         if valid_ratio and valid_ratio > 0 and len(full_dataset) > 1:
