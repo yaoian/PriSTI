@@ -22,8 +22,11 @@ except Exception:
 
 def _ensure_b_l_2(arr):
     t = arr if torch.is_tensor(arr) else torch.as_tensor(arr)
-    if t.ndim == 2 and t.shape[1] == 2:
-        t = t.unsqueeze(0)
+    if t.ndim == 2:
+        if t.shape[1] == 2:
+            t = t.unsqueeze(0)
+        elif t.shape[0] == 2:
+            t = t.transpose(0, 1).unsqueeze(0)
     elif t.ndim == 3 and t.shape[1] == 2:
         t = t.permute(0, 2, 1)
     if t.ndim != 3 or t.shape[-1] != 2:
@@ -31,11 +34,40 @@ def _ensure_b_l_2(arr):
     return t
 
 
+def _find_first_array(obj):
+    if torch.is_tensor(obj) or isinstance(obj, np.ndarray):
+        return obj
+    if isinstance(obj, dict):
+        for v in obj.values():
+            found = _find_first_array(v)
+            if found is not None:
+                return found
+    if isinstance(obj, (list, tuple)):
+        for v in obj:
+            found = _find_first_array(v)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_traj_from_item(item):
+    if isinstance(item, dict):
+        for key in ["loc", "loc_0", "traj", "trajs", "data", "xy", "coords"]:
+            if key in item:
+                return item[key]
+        fallback = _find_first_array(item)
+        if fallback is not None:
+            return fallback
+        raise ValueError("trajectory dict missing array-like fields")
+    return item
+
+
 def _stack_list_to_b_l_2(items):
     if len(items) == 0:
         raise ValueError("empty trajectory list")
     processed = []
     for x in items:
+        x = _extract_traj_from_item(x)
         t = x if torch.is_tensor(x) else torch.as_tensor(x)
         t = _ensure_b_l_2(t)
         processed.append(t)
@@ -58,6 +90,8 @@ def load_raw_trajs(path):
     obj = torch.load(path, map_location="cpu")
     if torch.is_tensor(obj):
         return _ensure_b_l_2(obj)
+    if isinstance(obj, np.ndarray) and getattr(obj, "dtype", None) == object:
+        return _stack_list_to_b_l_2(list(obj))
     if isinstance(obj, dict):
         for key in ["trajs", "traj", "data", "loc", "loc_0", "xy", "coords"]:
             if key in obj:
@@ -65,6 +99,9 @@ def load_raw_trajs(path):
                 if isinstance(data, (list, tuple)):
                     return _stack_list_to_b_l_2(data)
                 return _ensure_b_l_2(data)
+        fallback = _find_first_array(obj)
+        if fallback is not None:
+            return _ensure_b_l_2(fallback)
     if isinstance(obj, (list, tuple)):
         return _stack_list_to_b_l_2(obj)
     raise ValueError(f"unsupported data format in {path}")
