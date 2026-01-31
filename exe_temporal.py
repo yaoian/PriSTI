@@ -9,6 +9,7 @@ import torch
 import yaml
 from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset, random_split
+from tqdm import tqdm
 
 from dataset_trajectory import TrajectoryImputationDataset
 from temporal_model import TemporalPriSTIDiffusion
@@ -256,25 +257,35 @@ def train_temporal(
     for epoch_no in range(config_train["epochs"]):
         avg_loss = 0.0
         model.train()
-        for batch_no, batch in enumerate(train_loader, start=1):
-            optimizer.zero_grad()
-            loss = model(batch)
-            loss.backward()
-            optimizer.step()
+        with tqdm(train_loader, mininterval=5.0, maxinterval=50.0) as it:
+            for batch_no, batch in enumerate(it, start=1):
+                optimizer.zero_grad()
+                loss = model(batch)
+                loss.backward()
+                optimizer.step()
 
-            avg_loss += loss.item()
-            if writer:
-                writer.add_scalar("train/loss", loss.item(), global_step)
-            global_step += 1
-
-            if valid_loader is not None and validate_every_steps > 0 and global_step % validate_every_steps == 0:
-                valid_loss = _eval_loss(model, valid_loader)
+                avg_loss += loss.item()
                 if writer:
-                    writer.add_scalar("valid/loss", valid_loss, global_step)
-                logging.info("valid_loss:%s, step:%s", valid_loss, global_step)
-                if valid_loss < best_valid and foldername:
-                    best_valid = valid_loss
-                    torch.save(model.state_dict(), os.path.join(foldername, "best.pth"))
+                    writer.add_scalar("train/loss", loss.item(), global_step)
+                global_step += 1
+
+                it.set_postfix(
+                    ordered_dict={
+                        "loss": loss.item(),
+                        "avg_epoch_loss": avg_loss / batch_no,
+                        "epoch": epoch_no,
+                    },
+                    refresh=False,
+                )
+
+                if valid_loader is not None and validate_every_steps > 0 and global_step % validate_every_steps == 0:
+                    valid_loss = _eval_loss(model, valid_loader)
+                    if writer:
+                        writer.add_scalar("valid/loss", valid_loss, global_step)
+                    logging.info("valid_loss:%s, step:%s", valid_loss, global_step)
+                    if valid_loss < best_valid and foldername:
+                        best_valid = valid_loss
+                        torch.save(model.state_dict(), os.path.join(foldername, "best.pth"))
 
         if writer:
             writer.add_scalar("train/avg_epoch_loss", avg_loss / batch_no, epoch_no)
