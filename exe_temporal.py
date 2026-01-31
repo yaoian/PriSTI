@@ -86,22 +86,50 @@ def _linear_interpolate_np(x_gt, mask_obs):
     return out
 
 
-def load_raw_trajs(path):
+def _select_data_by_key(obj, data_key):
+    if data_key is None:
+        return obj
+    if isinstance(obj, (list, tuple)):
+        if data_key in ("a", "A"):
+            return obj[0]
+        if data_key in ("b", "B"):
+            return obj[1] if len(obj) > 1 else obj[0]
+        try:
+            idx = int(data_key)
+            return obj[idx]
+        except Exception:
+            raise ValueError(f"data_key={data_key} not valid for list/tuple")
+    if isinstance(obj, dict):
+        if data_key in obj:
+            return obj[data_key]
+        raise ValueError(f"data_key={data_key} not found in dict keys")
+    return obj
+
+
+def load_raw_trajs(path, data_key=None):
     obj = torch.load(path, map_location="cpu")
+    # 先处理 dict 顶层
+    if isinstance(obj, dict):
+        if data_key is not None and data_key in obj:
+            obj = obj[data_key]
+            data_key = None
+        else:
+            for key in ["trajs", "traj", "data", "loc", "loc_0", "xy", "coords"]:
+                if key in obj:
+                    obj = obj[key]
+                    break
+    # 若指定 data_key，且 obj 为列表/对象数组，则按元素选择
+    if data_key is not None:
+        if isinstance(obj, np.ndarray) and getattr(obj, "dtype", None) == object:
+            obj = [_select_data_by_key(item, data_key) for item in list(obj)]
+        elif isinstance(obj, (list, tuple)):
+            obj = [_select_data_by_key(item, data_key) for item in obj]
+        else:
+            obj = _select_data_by_key(obj, data_key)
     if torch.is_tensor(obj):
         return _ensure_b_l_2(obj)
     if isinstance(obj, np.ndarray) and getattr(obj, "dtype", None) == object:
         return _stack_list_to_b_l_2(list(obj))
-    if isinstance(obj, dict):
-        for key in ["trajs", "traj", "data", "loc", "loc_0", "xy", "coords"]:
-            if key in obj:
-                data = obj[key]
-                if isinstance(data, (list, tuple)):
-                    return _stack_list_to_b_l_2(data)
-                return _ensure_b_l_2(data)
-        fallback = _find_first_array(obj)
-        if fallback is not None:
-            return _ensure_b_l_2(fallback)
     if isinstance(obj, (list, tuple)):
         return _stack_list_to_b_l_2(obj)
     raise ValueError(f"unsupported data format in {path}")
@@ -261,6 +289,7 @@ def main(args):
     validate_every_steps = args.validate_every_steps if args.validate_every_steps is not None else data_cfg.get("validate_every_steps", 1000)
     valid_file = args.valid_file or data_cfg.get("valid_file", None)
     data_file = args.data_file or data_cfg.get("data_file", None)
+    data_key = args.data_key or data_cfg.get("data_key", None)
     if data_file is None:
         if dataset_name.lower() == "xian":
             data_file = "data/trajs/Xian_nov_cache.pth"
@@ -269,7 +298,7 @@ def main(args):
         else:
             raise ValueError(f"unknown dataset: {dataset_name}")
 
-    trajs = load_raw_trajs(data_file)
+    trajs = load_raw_trajs(data_file, data_key=data_key)
     if max_samples is not None:
         trajs = trajs[: int(max_samples)]
 
@@ -337,6 +366,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="trajectory.yaml")
     parser.add_argument("--dataset", type=str, default="xian", choices=["xian", "chengdu"])
     parser.add_argument("--data_file", type=str, default=None)
+    parser.add_argument("--data_key", type=str, default=None, help="For tuple/dict datasets: select a/b or index")
     parser.add_argument("--traj_len", type=int, default=None)
     parser.add_argument("--sparsity", type=float, default=None)
     parser.add_argument("--keep_mode", type=str, default=None, choices=["random", "interval"])

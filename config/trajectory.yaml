@@ -22,6 +22,7 @@ data:
   keep_mode: "random"
   interval: null
   data_file: null
+  data_key: "a"
   max_samples: null
   valid_ratio: 0.1
   validate_every_steps: 1000
