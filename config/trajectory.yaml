@@ -3,6 +3,9 @@ train:
   batch_size: 32
   lr: 1.0e-3
   is_lr_decay: false
+  log_interval: 50
+  mov_avg_interval: 100
+  resume_from: null
 
 diffusion:
   num_steps: 50

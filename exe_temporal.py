@@ -44,6 +44,48 @@ class MovingAverage:
         return sum(self._buf) / len(self._buf)
 
 
+def _move_optimizer_state(optimizer, device):
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(device)
+
+
+def _save_full_checkpoint(path, model, optimizer, scheduler, global_step, epoch, best_valid):
+    ckpt = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "global_step": int(global_step),
+        "epoch": int(epoch),
+        "best_valid": float(best_valid),
+    }
+    torch.save(ckpt, path)
+
+
+def _load_full_checkpoint(path, model, optimizer=None, scheduler=None):
+    ckpt = torch.load(path, map_location=model.device)
+    start_epoch = 0
+    global_step = 0
+    best_valid = float("inf")
+    is_full = False
+
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        model.load_state_dict(ckpt["model"], strict=True)
+        if optimizer is not None and ckpt.get("optimizer") is not None:
+            optimizer.load_state_dict(ckpt["optimizer"])
+            _move_optimizer_state(optimizer, model.device)
+        if scheduler is not None and ckpt.get("scheduler") is not None:
+            scheduler.load_state_dict(ckpt["scheduler"])
+        start_epoch = int(ckpt.get("epoch", 0))
+        global_step = int(ckpt.get("global_step", 0))
+        best_valid = float(ckpt.get("best_valid", float("inf")))
+        is_full = True
+    else:
+        model.load_state_dict(ckpt, strict=True)
+    return start_epoch, global_step, best_valid, is_full
+
+
 def _ensure_b_l_2(arr):
     t = arr if torch.is_tensor(arr) else torch.as_tensor(arr)
     if t.ndim == 2:
@@ -295,9 +337,11 @@ def train_temporal(
     foldername="",
     tb_dir=None,
     recovery_batch=None,
+    resume_path=None,
 ):
     optimizer = Adam(model.parameters(), lr=config_train["lr"], weight_decay=1e-6)
     is_lr_decay = config_train.get("is_lr_decay", False)
+    lr_scheduler = None
     if is_lr_decay:
         p1 = int(0.75 * config_train["epochs"])
         p2 = int(0.9 * config_train["epochs"])
@@ -328,7 +372,26 @@ def train_temporal(
 
     best_valid = float("inf")
     global_step = 0
-    for epoch_no in range(config_train["epochs"]):
+    start_epoch = 0
+    if resume_path:
+        start_epoch, global_step, best_valid, is_full = _load_full_checkpoint(
+            resume_path, model, optimizer=optimizer, scheduler=lr_scheduler
+        )
+        if is_full:
+            logging.info(
+                "resume_full:%s, epoch:%s, global_step:%s, best_valid:%s",
+                resume_path,
+                start_epoch,
+                global_step,
+                best_valid,
+            )
+        else:
+            logging.info("resume_weights_only:%s", resume_path)
+    if start_epoch >= config_train["epochs"]:
+        logging.info("resume epoch >= total epochs, skip training")
+        return
+
+    for epoch_no in range(start_epoch, config_train["epochs"]):
         avg_loss = 0.0
         model.train()
         last_step_time = time.perf_counter()
@@ -455,6 +518,15 @@ def train_temporal(
                     if valid_loss < best_valid and foldername:
                         best_valid = valid_loss
                         torch.save(model.state_dict(), os.path.join(foldername, "best.pth"))
+                        _save_full_checkpoint(
+                            os.path.join(foldername, "best_full.pth"),
+                            model,
+                            optimizer,
+                            lr_scheduler,
+                            global_step,
+                            epoch_no + 1,
+                            best_valid,
+                        )
                     if writer and recovery_batch is not None:
                         recovery_loss, fig = _eval_recovery(model, recovery_batch)
                         writer.add_scalar("Recovery Loss", recovery_loss, global_step)
@@ -467,6 +539,16 @@ def train_temporal(
         logging.info("avg_epoch_loss:%s, epoch:%s", avg_loss / batch_no, epoch_no)
         if is_lr_decay:
             lr_scheduler.step()
+        if foldername:
+            _save_full_checkpoint(
+                os.path.join(foldername, "last.pth"),
+                model,
+                optimizer,
+                lr_scheduler,
+                global_step,
+                epoch_no + 1,
+                best_valid,
+            )
 
     if valid_loader is not None:
         valid_loss = _eval_loss(model, valid_loader)
@@ -476,12 +558,31 @@ def train_temporal(
         if valid_loss < best_valid and foldername:
             best_valid = valid_loss
             torch.save(model.state_dict(), os.path.join(foldername, "best.pth"))
+            _save_full_checkpoint(
+                os.path.join(foldername, "best_full.pth"),
+                model,
+                optimizer,
+                lr_scheduler,
+                global_step,
+                config_train["epochs"],
+                best_valid,
+            )
         if writer and recovery_batch is not None:
             recovery_loss, fig = _eval_recovery(model, recovery_batch)
             writer.add_scalar("Recovery Loss", recovery_loss, global_step)
             if fig is not None:
                 writer.add_figure("Recovery Figure", fig, global_step)
                 plt.close(fig)
+        if foldername:
+            _save_full_checkpoint(
+                os.path.join(foldername, "last.pth"),
+                model,
+                optimizer,
+                lr_scheduler,
+                global_step,
+                config_train["epochs"],
+                best_valid,
+            )
 
     if output_path is not None:
         torch.save(model.state_dict(), output_path)
@@ -500,6 +601,7 @@ def main(args):
     config["seed"] = args.seed
     config["device"] = device
 
+    train_cfg = config.get("train", {})
     data_cfg = config.get("data", {})
     dataset_name = args.dataset or data_cfg.get("dataset", "xian")
     traj_len = args.traj_len or data_cfg.get("traj_len", 512)
@@ -594,6 +696,8 @@ def main(args):
         except Exception:
             recovery_batch = None
 
+    resume_path = args.resume or train_cfg.get("resume_from", None)
+
     train_temporal(
         model,
         config["train"],
@@ -603,6 +707,7 @@ def main(args):
         foldername=foldername,
         tb_dir=tb_dir,
         recovery_batch=recovery_batch,
+        resume_path=resume_path,
     )
 
 
@@ -620,6 +725,7 @@ if __name__ == "__main__":
     parser.add_argument("--valid_ratio", type=float, default=None)
     parser.add_argument("--validate_every_steps", type=int, default=None)
     parser.add_argument("--valid_file", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None, help="Resume full checkpoint path")
     parser.add_argument("--device", default="cuda:0", help="运行设备：cpu | cuda[:id] | auto")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
     parser.add_argument("--seed", type=int, default=42)
