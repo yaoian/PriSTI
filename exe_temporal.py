@@ -316,7 +316,11 @@ def _eval_recovery(model, batch):
     x_interp = batch["x_interp"].to(model.device).float()
     mask_obs = batch["mask_obs"].to(model.device).float()
 
-    x_pred, _ = model.impute(x_obs, x_interp, mask_obs, return_missing_only=False)
+    out = model.impute(x_obs, x_interp, mask_obs, return_missing_only=False)
+    if isinstance(out, tuple):
+        x_pred = out[0]
+    else:
+        x_pred = out
     mask_missing = (1.0 - mask_obs) > 0.5
     if mask_missing.any():
         mse = ((x_pred - x_gt) ** 2)[mask_missing.unsqueeze(-1).expand_as(x_gt)].mean().item()
